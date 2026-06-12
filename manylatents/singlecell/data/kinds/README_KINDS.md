@@ -2,21 +2,24 @@
 
 **Typed internal data representations for omics workflows.**
 
-This defines the schema seam between data loaders and ops/algorithms. Each kind carries its own structural semantics (named dimensions, coordinates, required fields), so ops can read and validate structure instead of guessing axes by convention.
+This defines the schema seam between data loaders and ops/algorithms. Each kind
+carries its own structural semantics (named dimensions, coordinates, required
+fields), so ops can read and validate structure instead of guessing axes by
+convention.
 
 ## Directory Structure
 
 ```
 manylatents/singlecell/data/
-├── kinds.py                    # Typed kinds (LabeledArray, SparseGraph, Trajectory)
-├── adapters.py                 # Generic: AnnData → LabeledArray converter
-├── tenx.py                     # Specific: 10x h5ad loader
-├── anndata.py                  # (existing loaders)
-├── cellxgene_census.py
-└── ...
+├── kinds/kinds.py                  # Typed kinds: LabeledArray, SparseGraph, Trajectory
+├── adapters/formats/adapters.py    # Generic: AnnData → LabeledArray  (from_anndata)
+├── adapters/sources/tenx.py        # Specific: 10x .h5 loader          (make_data)
+├── manifests/datasets_10x.csv      # Dataset registry (the spreadsheet's home)
+├── manifests/registry.py           # Registry loader — single source of truth
+├── anndata.py                      # existing datamodule
+├── anndata_dataset.py
+└── cellxgene_census.py
 ```
-
-Added to the existing loader structure without reorganization.
 
 ## The Problem We're Solving
 
@@ -24,288 +27,212 @@ Added to the existing loader structure without reorganization.
 - ❌ **Bare numpy arrays + positional convention**: Dims get reordered, and code has to *guess* what axis 0 means.
 - ✅ **Typed kinds with named dims**: Structure is self-describing. Ops read dims, never guess them.
 
-## The Three Kinds
+## The Kinds
+
+Every kind subclasses `Kind` (`kinds.py`) and implements four things:
+**constructor**, `validate()` (runs on `load`), `serialize(path)`, and `load(path)`.
+
+| Kind | Wraps | Required structure | Status |
+|------|-------|--------------------|--------|
+| `LabeledArray` | `xarray.DataArray` | dims `cell`, `gene` (+ optional `time`) | ✅ implemented |
+| `SparseGraph` | `torch_geometric.data.Data` | a `Data` graph; attrs declared per-op | 🚧 minimal (validate + require) |
+| `TrajectoryXXX` | — | TBD (MIOFlow-style paths) | ⛔ placeholder stub, not implemented |
+
+> **Note:** the trajectory kind currently exists only as the placeholder class
+> `TrajectoryXXX` whose methods are no-ops. Don't depend on it yet — see
+> *Adding a New Kind* below for the shape it should take when fleshed out.
 
 ### LabeledArray
 
-**xarray DataArray with named dimensions.** The primary kind for cell×gene matrices and other labeled array data.
+**xarray DataArray with named dimensions.** The primary kind for cell×gene
+matrices and other labeled array data.
 
-**Required dims:** `cell`, `gene`
-
-**Optional dims:** `time` (for time-series data)
-
-**Attributes:** Carries domain metadata (e.g., `genome`, `gene_ids`) in `.attrs`.
-
-#### Construction
+- **Required dims:** `cell`, `gene`  **Optional:** `time`
+- **Metadata:** domain attrs (e.g. `genome`) live in `.attrs`; labels (e.g.
+  `gene_ids`) live in `.coords`.
+- **Accessor:** `.da` returns the underlying `DataArray`.
 
 ```python
+import numpy as np
 import xarray as xr
-from manylatents.singlecell.data.kinds import LabeledArray
+from manylatents.singlecell.data.kinds.kinds import LabeledArray
 
-# From raw numpy
-data = np.random.rand(1000, 2000)  # 1000 cells × 2000 genes
 da = xr.DataArray(
-    data,
+    np.random.rand(1000, 2000),                 # 1000 cells × 2000 genes
     dims=["cell", "gene"],
-    coords={
-        "cell": cell_ids,
-        "gene": gene_names,
-    },
-    attrs={"genome": "GRCh38"}
+    coords={"cell": cell_ids, "gene": gene_names},
+    attrs={"genome": "GRCh38"},
 )
 kind = LabeledArray(da)
-kind.validate()
+kind.validate()        # wraps a non-empty DataArray? returns self, else raises
 ```
 
-#### Usage in Ops
+**`validate()`** is a structural check, not a contract check: it confirms the
+kind wraps a non-empty `DataArray` and returns `self` (so it chains). It does
+**not** enforce specific dims — that's `require`'s job.
+
+**`require(*dims, coords=())`** is how an op declares the structure it consumes.
+It raises a clear `ValueError` if a named dim or coord is missing, and returns
+`self`:
 
 ```python
 def my_op(kind: LabeledArray) -> LabeledArray:
-    """Op that requires 'time' dimension."""
-    if "time" not in kind._da.dims:
-        raise ValueError("This op requires a 'time' dimension")
-    
-    # Operate on kind._da
-    result = kind._da.mean(dim="time")
+    kind.require("cell", "gene", "time")    # raises "requires dims [...]" if absent
+    result = kind.da.mean(dim="time")
     return LabeledArray(result)
 ```
 
-#### Serialization
+**Serialization** is zarr. `load` reads the array back with `open_dataarray`, so
+the round-trip is name-agnostic (works for the unnamed arrays the adapter
+produces) and runs `validate()` on read:
 
 ```python
-# Write to zarr
 kind.serialize("data.zarr")
-
-# Load back (validation runs on read)
-loaded = LabeledArray.load("data.zarr")
-loaded.validate()  # Passes if structure is intact
+loaded = LabeledArray.load("data.zarr")      # validates on read
 ```
 
-#### Time-Series Example
+### SparseGraph (🚧 minimal)
+
+Wraps a `torch_geometric.data.Data` graph. `validate()` checks it is a `Data`;
+`require(*attrs)` asserts named attributes exist; `serialize`/`load` use
+`torch.save`/`torch.load`. `torch_geometric` is a heavy dependency, so it is
+imported lazily inside the methods that use it.
 
 ```python
-# 1000 cells × 2000 genes × 10 timepoints
-data = np.random.rand(1000, 2000, 10)
-da = xr.DataArray(
-    data,
-    dims=["cell", "gene", "time"],
-    coords={
-        "cell": cell_ids,
-        "gene": gene_names,
-        "time": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    }
-)
-kind = LabeledArray(da, required_dims={"cell", "gene", "time"})
-kind.validate()
-```
-
-### SparseGraph
-
-**Stub for typed graph representations.** Will be fleshed out for RITINI-style regulatory networks and other graph algorithms.
-
-**API (current stub):**
-
-```python
-from manylatents.singlecell.data.kinds import SparseGraph
-
-# Construct
-graph = SparseGraph(edge_list=[(source, target, weight), ...])
-
-# Validate (no-op in stub)
+from manylatents.singlecell.data.kinds.kinds import SparseGraph
+graph = SparseGraph(data)        # data is a torch_geometric Data
 graph.validate()
-
-# Serialize/load (not yet implemented)
-graph.serialize("path.zarr")
-loaded = SparseGraph.load("path.zarr")
+graph.require("edge_index")
 ```
 
-**Planned features (M1+):**
-- Edge list → sparse adjacency matrix conversion
-- Node/edge metadata
-- Serialization to sparse zarr format
+### Trajectory (⛔ stub)
 
-### Trajectory
-
-**Stub for typed trajectory representations.** Will be fleshed out for MIOFlow-style cell fate trajectories and temporal pseudotime paths.
-
-**API (current stub):**
-
-```python
-from manylatents.singlecell.data.kinds import Trajectory
-
-# Construct
-paths = [
-    ["cell_1", "cell_2", "cell_3"],
-    ["cell_4", "cell_5"],
-]
-traj = Trajectory(paths=paths)
-
-# Validate (no-op in stub)
-traj.validate()
-
-# Serialize/load (not yet implemented)
-traj.serialize("path.zarr")
-loaded = Trajectory.load("path.zarr")
-```
-
-**Planned features (M1+):**
-- Variable-length path representation
-- Pseudotime values and uncertainty
-- Branching structure (which paths connect)
+`TrajectoryXXX` is a placeholder for MIOFlow-style cell-fate trajectories. Its
+methods are no-ops today; it is intentionally unfinished.
 
 ## AnnData Adapter
 
-The **only place** AnnData is used internally. Located in `manylatents/singlecell/data/adapters.py`. Conversion happens at the edge:
+The edge where AnnData is converted to a typed kind — **the only place AnnData
+is used internally.** Located in `adapters/formats/adapters.py`:
 
 ```python
-from manylatents.singlecell.data.adapters import anndata_to_labeled_array
-
-# Load h5ad
 import scanpy as sc
-adata = sc.read_h5ad("data.h5ad")
+from manylatents.singlecell.data.adapters.formats.adapters import from_anndata
 
-# Convert to typed kind
-kind = anndata_to_labeled_array(adata, use_raw=False)
-kind.validate()
+adata = sc.read_h5ad("data.h5ad")
+kind = from_anndata(adata, coords={"cell": adata.obs_names, "gene": adata.var_names})
+# returns a validated LabeledArray; downstream code never touches AnnData
 ```
 
-Downstream code never touches AnnData — only the typed kind.
-
-## 10x Genomics Loader
-
-Located in `manylatents/singlecell/data/tenx.py`. Loads 10x h5ad files and converts to `LabeledArray`:
+For 10x `.h5` files, `adapters/sources/tenx.py` wraps this with the right field
+checks (rejects non-scRNA-seq modalities, requires `gene_ids`/`genome`):
 
 ```python
-from manylatents.singlecell.data import Gemonics
-
-# Load and convert
-loader = Gemonics("filtered_feature_bc_matrix.h5ad")
-kind = loader.kind
-
-# Use kind
-kind.validate()
-kind.serialize("output.zarr")
-
-# Load later
-loaded = Gemonics.load("output.zarr")
+from manylatents.singlecell.data.adapters.sources.tenx import make_data
+kind = make_data("filtered_feature_bc_matrix.h5")   # -> validated LabeledArray
 ```
 
 ## Example Ops
 
-Located in `tests/singlecell/test_op/example_ops.py`. Demonstrates how ops validate required dims:
-
-### temporal_analysis
-
-Requires `time` dimension; fails cleanly without it.
+Minimal demonstration ops live in `tests/singlecell/test_op/example_ops.py`.
+They show an op declaring its contract via `require` up front:
 
 ```python
-from tests.singlecell.test_op.example_ops import temporal_analysis
+from tests.singlecell.test_op.example_ops import temporal_analysis, basic_filter
 
-kind = LabeledArray.load("data.zarr")
-
-# If kind has time dim: succeeds
-if "time" in kind._da.dims:
-    result = temporal_analysis(kind)
-
-# If kind doesn't have time dim: raises ValueError with clear message
+temporal_analysis(kind)                  # raises unless kind has a 'time' dim
+basic_filter(kind, min_expression=0.1)   # needs only cell/gene
 ```
 
-### basic_filter
+These are exercised by `TestExampleOps` in `tests/singlecell/test_kinds.py` so
+they stay in sync with the kind API.
 
-Works on any `LabeledArray`. No special dim requirements.
+## Dataset Manifest (the spreadsheet's home)
+
+The Geomancer "Datasets for Geomancer - 10x Genomics" spreadsheet lives in-repo
+at **`manylatents/singlecell/data/manifests/datasets_10x.csv`** and is read
+through the registry **`manylatents.singlecell.data.manifests`**. This is the
+single source of truth for *what data exists* — nothing hardcodes dataset paths.
+
+**The spreadsheet is expected to change.** To update it, drop in a fresh export
+with the same columns (only `Dataset_Name` and `wget_commands` — which must hold
+a `.h5` URL — are required; extra columns are ignored). To use a private or newer
+copy without editing the repo, set `GEOMANCER_DATASETS_CSV` to its path; it
+overrides the in-repo default.
 
 ```python
-from tests.singlecell.test_op.example_ops import basic_filter
+from manylatents.singlecell.data.manifests import (
+    manifest_path,    # active CSV path (env override, else in-repo default)
+    load_manifest,    # -> list[DatasetEntry(name, url)] with a usable .h5 link
+    select_random,    # -> n random entries (seed= for reproducibility)
+)
 
-kind = LabeledArray.load("data.zarr")
-filtered = basic_filter(kind, min_expression=0.1)
+for entry in load_manifest():
+    print(entry.name, entry.url)
 ```
+
+### Adding a dataset
+
+1. Add a row to `datasets_10x.csv` (or your `GEOMANCER_DATASETS_CSV` copy) with a
+   `Dataset_Name` and a `wget_commands` cell containing the `.h5` download URL.
+2. It is now discoverable via `load_manifest()` / `select_random()` — no code
+   change needed.
+3. Load it through the standard path: download the `.h5`, then `make_data(path)`.
+
+The real-data test `test_random_10x_dataset_loads_validates_and_enforces_dims`
+samples from this manifest and runs each dataset through `make_data`, validating
+structure on read. It is marked `network`/`slow` and skips when the manifest is
+absent or the host is offline.
 
 ## Adding a New Kind
 
-1. **Define the class** in `manylatents/singlecell/data/kinds.py`:
+1. **Define the class** in `kinds/kinds.py`:
 
 ```python
 class MyKind(Kind):
-    """Description."""
-    
-    def __init__(self, data, **kwargs):
+    def __init__(self, data):
         self._data = data
-    
-    def validate(self) -> None:
-        """Check structure. Raise on failure."""
-        if not self._is_valid():
-            raise ValueError("Invalid structure")
-    
+
+    def validate(self):
+        if not _is_valid(self._data):
+            raise ValueError("MyKind: <what's wrong>")
+        return self
+
     def serialize(self, path: str) -> None:
-        """Write to disk."""
         ...
-    
+
     @classmethod
-    def load(cls, path: str) -> "MyKind":
-        """Load from disk and validate on read."""
-        obj = cls(...)
-        obj.validate()
-        return obj
+    def load(cls, path):
+        data = ...                    # read from disk
+        return cls(data).validate()   # validation runs on read
 ```
 
-2. **Write tests** in `tests/test_kinds.py`:
+2. **Write tests** in `tests/singlecell/test_kinds.py`:
+   - a **round-trip** test (construct → serialize → load → identical), and
+   - a **rejection** test (malformed input fails on `validate`/`load`).
 
-```python
-class TestMyKind:
-    def test_round_trip(self):
-        """Construct → serialize → load → validate → identical."""
-        ...
-    
-    def test_validate_rejects_malformed(self):
-        """Malformed data fails validation on load."""
-        ...
-```
+3. **Update this README** with the kind, its required structure, and usage.
 
-3. **Update this README** with:
-   - What the kind represents
-   - Required fields/dims
-   - Usage examples
-   - Serialization format
-
-## Round-Trip Guarantees
-
-Each kind must satisfy:
+## Invariants Every Kind Must Hold
 
 ```
-Construct → validate()
-           ↓
-        serialize(path)
-           ↓
-        load(path) → validate()  ← validation runs on read
-           ↓
-        identical to original
+construct → validate()
+          → serialize(path)
+          → load(path) → validate()      ← validation runs on read
+          → identical to the original
 ```
 
-This ensures:
-- Malformed data is rejected on load, not silently accepted
-- Named dims survive slicing/transposing
-- Metadata (coords, attrs) is preserved
-
-## Testing
-
-Run the test suite:
-
-```bash
-pytest tests/test_kinds.py -v
-```
-
-Expected coverage:
-- **Round-trip tests**: Each kind's construct→serialize→load→validate cycle
-- **Rejection tests**: Malformed kinds fail on load
-- **Op validation tests**: Ops can require dims and fail cleanly without them
+- Malformed data is rejected on read, not silently accepted.
+- Named dims survive slicing/transposing.
+- Coords/attrs are preserved across the round-trip.
 
 ## Coordination with Downstreams
 
-**Brian (manylatents#269)**: Model ops consume these kinds. Lock the `LabeledArray` required dims (`cell`, `gene`, optional `time`) before building against it.
-
-**MIOFlow/RITINI**: Will flesh out `Trajectory` and `SparseGraph` stubs. Shape of ops will be finalized when implementations land.
+- **Model ops (manylatents#269):** consume `LabeledArray` with dims `cell`,
+  `gene` (optional `time`). That contract is enforced per-op via `require`.
+- **MIOFlow / RITINI:** will flesh out the `Trajectory` and `SparseGraph` stubs;
+  op shapes finalize when those land.
 
 ---
 
-*Last updated: 2026-06-03*
+*Last updated: 2026-06-11*

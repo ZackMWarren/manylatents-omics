@@ -4,29 +4,15 @@ Tests for typed kinds: construction, round-trip, validation, and op contracts.
 Demonstrates that:
 1. A kind survives the construct → serialize → load → validate cycle.
 2. Malformed kinds are rejected by ``validate`` (the wrapped object must be a
-   ``DataArray``).
+   non-empty ``DataArray``).
 3. Required dimensions/coordinates are enforced structurally by ``require`` —
    the contract an op declares for the kind it consumes.
-4. Real 10x datasets (sampled from the Geomancer CSV) load, validate, and have
-   their dimension requirements enforced by ``require``.
 
-The real-data tests are marked ``network``/``slow`` and skip gracefully when the
-dataset CSV is absent or the host is offline. Knobs (all optional):
-  - ``GEOMANCER_DATASETS_CSV``  path to the datasets CSV
-  - ``GEOMANCER_10X_CACHE``     directory to cache downloaded ``.h5`` files
-  - ``GEOMANCER_MAX_MB``        skip datasets larger than this (default 1500)
-  - ``GEOMANCER_TEST_SEED``     seed the random dataset pick for reproducibility
+Dataset-loading tests (malformed-dataset rejection, real 10x loads) live in
+``test_tenxdatasets.py``.
 """
 
-import csv
-import os
-import random
-import re
-import shutil
-import socket
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -142,6 +128,12 @@ class TestLabeledArrayValidation:
         with pytest.raises(ValueError, match="must wrap a DataArray"):
             kind.validate()
 
+    def test_validate_fails_on_empty(self):
+        da = xr.DataArray(np.empty((0, 0)), dims=["cell", "gene"])  # size-0 array
+        kind = LabeledArray(da)
+        with pytest.raises(ValueError, match="empty"):
+            kind.validate()
+
 
 # ==============================================================================
 # Op contracts: requiring dimensions and coordinates via ``require``
@@ -207,132 +199,45 @@ class TestRequireContract:
 
 
 # ==============================================================================
-# Real 10x datasets sampled from the Geomancer CSV
+# Example ops: the shipped demonstration ops stay in sync with the kind API
 # ==============================================================================
 
 
-def _datasets_csv() -> Path | None:
-    """Locate the Geomancer datasets CSV (env override, else repo root)."""
-    env = os.environ.get("GEOMANCER_DATASETS_CSV")
-    if env:
-        p = Path(env)
-        return p if p.exists() else None
-    # tests/singlecell/test_kinds.py -> tests/singlecell -> tests -> manylatents-omics
-    candidate = Path(__file__).resolve().parents[2] / "Datasets for Geomancer - 10x Genomics.csv"
-    return candidate if candidate.exists() else None
+class TestExampleOps:
+    """Smoke tests so ``tests/singlecell/test_op/example_ops.py`` can't silently rot."""
 
+    def _array(self, dims, coords):
+        return xr.DataArray(np.ones(tuple(len(coords[d]) for d in dims)), dims=dims, coords=coords)
 
-_H5_URL_RE = re.compile(r"https?://\S+?\.h5\b")
+    def test_temporal_analysis_requires_time(self):
+        from tests.singlecell.test_op.example_ops import temporal_analysis
 
+        no_time = LabeledArray(self._array(
+            ["cell", "gene"],
+            {"cell": ["c0", "c1"], "gene": ["g0", "g1", "g2"]},
+        ))
+        with pytest.raises(ValueError, match="requires dims"):
+            temporal_analysis(no_time)
 
-def _select_random_datasets(n: int = 5) -> list[tuple[str, str]]:
-    """Pick ``n`` random (name, .h5 URL) pairs from the datasets CSV."""
-    csv_path = _datasets_csv()
-    if csv_path is None:
-        return []
+    def test_temporal_analysis_runs_with_time(self):
+        from tests.singlecell.test_op.example_ops import temporal_analysis
 
-    rows: list[tuple[str, str]] = []
-    with open(csv_path, newline="") as f:
-        for row in csv.DictReader(f):
-            match = _H5_URL_RE.search(row.get("wget_commands") or "")
-            if match:
-                rows.append((row.get("Dataset_Name") or match.group(0), match.group(0)))
-    if not rows:
-        return []
+        with_time = LabeledArray(self._array(
+            ["cell", "gene", "time"],
+            {"cell": ["c0", "c1"], "gene": ["g0", "g1", "g2"], "time": [0, 1]},
+        ))
+        out = temporal_analysis(with_time)
+        assert isinstance(out, LabeledArray)
+        assert "time" in out.da.dims
 
-    seed = os.environ.get("GEOMANCER_TEST_SEED")
-    rng = random.Random(int(seed)) if (seed and seed.isdigit()) else random.Random()
-    return rng.sample(rows, min(n, len(rows)))
+    def test_basic_filter_drops_low_expression(self):
+        from tests.singlecell.test_op.example_ops import basic_filter
 
-
-# Resolved once at collection time so each dataset is a separate test case.
-_SELECTED_DATASETS = _select_random_datasets(5)
-
-
-def _short_id(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")[:40]
-
-
-def _cache_dir() -> Path:
-    d = Path(os.environ.get("GEOMANCER_10X_CACHE") or (Path(tempfile.gettempdir()) / "geomancer_10x_cache"))
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _download_h5(url: str) -> Path:
-    """Download (and cache) a 10x ``.h5``; skip the test on network failure or size cap."""
-    dest = _cache_dir() / url.rsplit("/", 1)[-1]
-    if dest.exists() and dest.stat().st_size > 0:
-        return dest
-
-    max_mb = int(os.environ.get("GEOMANCER_MAX_MB", "1500"))
-    req = urllib.request.Request(url, headers={"User-Agent": "geomancer-tests"})
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            length = resp.headers.get("Content-Length")
-            if length and int(length) > max_mb * 1024 * 1024:
-                pytest.skip(
-                    f"{dest.name} is {int(length) // (1024 * 1024)} MB > cap {max_mb} MB "
-                    f"(raise GEOMANCER_MAX_MB to include it)"
-                )
-            part = dest.with_suffix(dest.suffix + ".part")
-            with open(part, "wb") as out:
-                shutil.copyfileobj(resp, out)
-        part.rename(dest)
-    except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
-        if dest.exists():
-            dest.unlink()
-        pytest.skip(f"could not download {url}: {e}")
-    return dest
-
-
-@pytest.mark.network
-@pytest.mark.slow
-@pytest.mark.skipif(not _SELECTED_DATASETS, reason="Geomancer 10x datasets CSV not found")
-@pytest.mark.parametrize(
-    "ds_name,url",
-    _SELECTED_DATASETS,
-    ids=[_short_id(name) for name, _ in _SELECTED_DATASETS],
-)
-def test_random_10x_dataset_loads_validates_and_enforces_dims(ds_name, url):
-    """A randomly chosen 10x dataset loads, validates, and respects op dim contracts."""
-    from manylatents.singlecell.data.adapters.sources.tenx import make_data
-
-    h5 = _download_h5(url)
-
-    # 1. Loading: real 10x .h5 -> typed LabeledArray via the production adapter.
-    try:
-        kind = make_data(str(h5))
-    except ValueError as e:
-        # The adapter rejects non-scRNA-seq (antibody/CRISPR) modalities at the
-        # edge — that's correct behavior, just not testable as scRNA-seq here.
-        if "not scRNA-seq" in str(e):
-            pytest.skip(f"{ds_name} is multimodal, not pure scRNA-seq: {e}")
-        raise
-    assert isinstance(kind, LabeledArray)
-
-    # 2. Validation: the loaded kind wraps a well-formed DataArray and satisfies
-    #    the cell/gene contract every downstream op assumes.
-    kind.validate()
-    kind.require("cell", "gene", coords=("cell", "gene"))
-    assert {"cell", "gene"} <= set(kind.da.dims)
-    assert {"cell", "gene"} <= set(kind.da.coords)
-
-    # 3. Requiring dimensions for specific ops.
-    #    A temporal op needs a 'time' dim, which raw 10x data lacks, so require
-    #    must reject this kind cleanly rather than fail deep in a computation.
-    assert "time" not in kind.da.dims
-    with pytest.raises(ValueError, match="requires dims"):
-        kind.require("cell", "gene", "time")
-
-    #    A cell/gene-only op is satisfied. Exercise it on a small dense slice so
-    #    we don't materialize the full (often >10k×30k) sparse matrix.
-    n_cells = min(64, kind.da.sizes["cell"])
-    n_genes = min(128, kind.da.sizes["gene"])
-    small = kind.da.isel(cell=slice(0, n_cells), gene=slice(0, n_genes))
-    small = small.copy(data=np.asarray(small.data.todense()))
-    small_kind = LabeledArray(small)
-
-    small_kind.validate()
-    small_kind.require("cell", "gene")
-    assert {"cell", "gene"} <= set(small_kind.da.dims)
+        da = xr.DataArray(
+            np.array([[0.0, 5.0], [0.0, 5.0]]),  # gene g0 mean 0, gene g1 mean 5
+            dims=["cell", "gene"],
+            coords={"cell": ["c0", "c1"], "gene": ["g0", "g1"]},
+        )
+        out = basic_filter(LabeledArray(da), min_expression=1.0)
+        assert isinstance(out, LabeledArray)
+        assert list(out.da.gene.values) == ["g1"]  # low-expression g0 removed

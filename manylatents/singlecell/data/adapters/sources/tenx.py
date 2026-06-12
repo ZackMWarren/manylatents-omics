@@ -65,11 +65,17 @@ def make_data(
     }
 
     if use_time:
-        try:
-            time = adata.obs_names.str.split("-").str[-1]
-            coords["time"] = ("cell", time)
-        except Exception as e:  # noqa: BLE001 - barcode format varies across datasets
-            logger.warning(f"Could not extract time from cell barcodes: {e}")
+        # Time-series datasets encode a per-cell timepoint as the trailing
+        # ``-<int>`` group of the barcode. If no barcode carries one, the caller
+        # asked for time labels this dataset does not have — reject rather than
+        # silently proceed without a time axis.
+        time = pd.Series(adata.obs_names, dtype="string").str.extract(r"-(\d+)$")[0]
+        if time.isna().all():
+            raise ValueError(
+                f"AnnData at {adata_path}: use_time=True but no cell barcode carries a "
+                f"trailing '-<int>' time suffix; this dataset has no time labels to extract."
+            )
+        coords["time"] = ("cell", time.to_numpy())
 
     if "genome" not in adata.var or len(adata.var) == 0:
         raise ValueError(

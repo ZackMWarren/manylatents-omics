@@ -47,6 +47,8 @@ class LabeledArray(Kind):
     def validate(self) -> None:
         if not isinstance(self._da, xr.DataArray):
             raise ValueError("LabeledArray must wrap a DataArray")
+        if self._da.size == 0:
+            raise ValueError(f"LabeledArray is empty (shape {self._da.shape})")
         return self
     
     def require(self, *dims: str, coords: tuple[str, ...] = ()) -> "LabeledArray":
