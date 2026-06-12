@@ -3,10 +3,12 @@ Tests for typed kinds: construction, round-trip, validation, and op contracts.
 
 Demonstrates that:
 1. A kind survives the construct → serialize → load → validate cycle.
-2. Malformed kinds are rejected by ``validate`` (missing dims/coords, null coords).
-3. Required dimensions are enforced structurally by ops.
+2. Malformed kinds are rejected by ``validate`` (the wrapped object must be a
+   ``DataArray``).
+3. Required dimensions/coordinates are enforced structurally by ``require`` —
+   the contract an op declares for the kind it consumes.
 4. Real 10x datasets (sampled from the Geomancer CSV) load, validate, and have
-   their dimension requirements enforced by ops.
+   their dimension requirements enforced by ``require``.
 
 The real-data tests are marked ``network``/``slow`` and skip gracefully when the
 dataset CSV is absent or the host is offline. Knobs (all optional):
@@ -51,7 +53,11 @@ def test_kind_is_abstract():
 
 
 class TestLabeledArrayRoundTrip:
-    """Test construct → serialize → load → validate cycle."""
+    """Test construct → serialize → load → validate cycle.
+
+    ``load`` uses ``open_dataarray``, so the wrapped array round-trips whatever
+    its name (including the unnamed arrays the adapter produces).
+    """
 
     def test_round_trip_basic(self):
         """Round-trip with minimal data preserves values and structure."""
@@ -69,10 +75,10 @@ class TestLabeledArrayRoundTrip:
             loaded = LabeledArray.load(path)
 
             loaded.validate()
-            assert (loaded.data == kind.data).all()
-            assert list(loaded.data.dims) == list(kind.data.dims)
-            assert list(loaded.data.cell) == list(kind.data.cell)
-            assert list(loaded.data.gene) == list(kind.data.gene)
+            assert (loaded.da == kind.da).all()
+            assert list(loaded.da.dims) == list(kind.da.dims)
+            assert list(loaded.da.cell) == list(kind.da.cell)
+            assert list(loaded.da.gene) == list(kind.da.gene)
 
     def test_round_trip_with_attrs(self):
         """Round-trip preserves attributes."""
@@ -89,8 +95,8 @@ class TestLabeledArrayRoundTrip:
             kind.serialize(path)
             loaded = LabeledArray.load(path)
 
-            assert loaded.data.attrs["genome"] == "GRCh38"
-            assert loaded.data.attrs["source"] == "10x"
+            assert loaded.da.attrs["genome"] == "GRCh38"
+            assert loaded.da.attrs["source"] == "10x"
 
     def test_round_trip_with_time_dim(self):
         """Round-trip with an optional time dimension."""
@@ -103,133 +109,101 @@ class TestLabeledArrayRoundTrip:
                 "time": [0, 1, 2],
             },
         )
-        kind = LabeledArray(da, required_dims={"cell", "gene", "time"})
+        kind = LabeledArray(da)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = str(Path(tmpdir) / "test.zarr")
             kind.serialize(path)
             loaded = LabeledArray.load(path)
 
-            assert "time" in loaded.data.dims
-            assert len(loaded.data.time) == 3
+            assert "time" in loaded.da.dims
+            assert len(loaded.da.time) == 3
 
 
 # ==============================================================================
-# LabeledArray: validation
+# LabeledArray: validation (the wrapped object must be a DataArray)
 # ==============================================================================
 
 
 class TestLabeledArrayValidation:
-    """Test structural enforcement of required dims and coords."""
+    """``validate`` is a structural type check and returns the kind for chaining."""
 
-    def test_validate_passes_with_required_dims(self):
+    def test_validate_passes_on_dataarray(self):
         da = xr.DataArray(
             np.ones((3, 2)),
             dims=["cell", "gene"],
             coords={"cell": ["c1", "c2", "c3"], "gene": ["g1", "g2"]},
         )
-        LabeledArray(da, required_dims={"cell", "gene"}).validate()  # no raise
+        kind = LabeledArray(da)
+        assert kind.validate() is kind  # returns self, no raise
 
-    def test_validate_fails_missing_cell_dim(self):
-        da = xr.DataArray(np.ones((5,)), dims=["gene"])
-        kind = LabeledArray(da, required_dims={"cell", "gene"})
-        with pytest.raises(ValueError, match="missing required dims"):
-            kind.validate()
-
-    def test_validate_fails_wrong_dims(self):
-        da = xr.DataArray(
-            np.ones((10, 5)),
-            dims=["samples", "features"],  # wrong names
-            coords={"samples": range(10), "features": range(5)},
-        )
-        kind = LabeledArray(da, required_dims={"cell", "gene"})
-        with pytest.raises(ValueError, match="missing required dims"):
-            kind.validate()
-
-    def test_validate_fails_missing_required_coord(self):
-        """A declared coordinate that is absent fails validation."""
-        da = xr.DataArray(
-            np.ones((3, 2)),
-            dims=["cell", "gene"],
-            coords={"cell": ["c1", "c2", "c3"], "gene": ["g1", "g2"]},
-        )
-        kind = LabeledArray(
-            da, required_dims={"cell", "gene"}, required_coords={"cell", "gene", "gene_ids"}
-        )
-        with pytest.raises(ValueError, match="missing coordinates"):
-            kind.validate()
-
-    def test_validate_fails_on_null_coord(self):
-        """Null values in a required coordinate (metadata loss) are rejected."""
-        da = xr.DataArray(
-            np.ones((3, 2)),
-            dims=["cell", "gene"],
-            coords={
-                "cell": ["c1", "c2", "c3"],
-                "gene": ["g1", "g2"],
-                "gene_ids": ("gene", np.array(["ENSG1", None], dtype=object)),
-            },
-        )
-        kind = LabeledArray(
-            da, required_dims={"cell", "gene"}, required_coords={"gene_ids"}
-        )
-        with pytest.raises(ValueError, match="null values"):
+    def test_validate_fails_on_non_dataarray(self):
+        kind = LabeledArray([1, 2, 3])  # not an xr.DataArray
+        with pytest.raises(ValueError, match="must wrap a DataArray"):
             kind.validate()
 
 
 # ==============================================================================
-# Op contracts: requiring dimensions
+# Op contracts: requiring dimensions and coordinates via ``require``
 # ==============================================================================
 
 
-class TestOpDimensionRequirements:
-    """Ops declare and enforce the dims they consume."""
+class TestRequireContract:
+    """Ops declare and enforce the dims/coords they consume via ``kind.require``."""
+
+    def _array(self, dims, coords):
+        return xr.DataArray(np.ones(tuple(len(coords[d]) for d in dims)), dims=dims, coords=coords)
+
+    def test_require_passes_with_present_dims(self):
+        da = self._array(
+            ["cell", "gene"],
+            {"cell": ["c1", "c2", "c3"], "gene": ["g1", "g2"]},
+        )
+        kind = LabeledArray(da)
+        assert kind.require("cell", "gene") is kind  # returns self for chaining
+
+    def test_require_rejects_missing_dim(self):
+        da = xr.DataArray(np.ones((5,)), dims=["gene"], coords={"gene": [f"g{i}" for i in range(5)]})
+        with pytest.raises(ValueError, match="requires dims"):
+            LabeledArray(da).require("cell", "gene")
+
+    def test_require_rejects_wrong_dims(self):
+        da = self._array(
+            ["samples", "features"],  # wrong names
+            {"samples": list(range(10)), "features": list(range(5))},
+        )
+        with pytest.raises(ValueError, match="requires dims"):
+            LabeledArray(da).require("cell", "gene")
+
+    def test_require_rejects_missing_coord(self):
+        da = self._array(
+            ["cell", "gene"],
+            {"cell": ["c1", "c2", "c3"], "gene": ["g1", "g2"]},
+        )
+        with pytest.raises(ValueError, match="requires coords"):
+            LabeledArray(da).require("cell", "gene", coords=("gene_ids",))
 
     def test_temporal_op_requires_time_dim(self):
-        from tests.singlecell.test_op.example_ops import temporal_analysis
-
-        da_time = xr.DataArray(
-            np.random.rand(10, 5, 3),
-            dims=["cell", "gene", "time"],
-            coords={
+        """An op that needs a ``time`` dim accepts a kind that carries one."""
+        da = self._array(
+            ["cell", "gene", "time"],
+            {
                 "cell": [f"c{i}" for i in range(10)],
                 "gene": [f"g{i}" for i in range(5)],
                 "time": [0, 1, 2],
             },
         )
-        result = temporal_analysis(LabeledArray(da_time, required_dims={"cell", "gene", "time"}))
-        assert isinstance(result, LabeledArray)
-        assert "time" in result.data.dims
+        kind = LabeledArray(da)
+        assert kind.require("cell", "gene", "time") is kind
 
     def test_temporal_op_rejects_missing_time_dim(self):
-        from tests.singlecell.test_op.example_ops import temporal_analysis
-
-        da_no_time = xr.DataArray(
-            np.random.rand(10, 5),
-            dims=["cell", "gene"],
-            coords={"cell": [f"c{i}" for i in range(10)], "gene": [f"g{i}" for i in range(5)]},
+        """The same op fails cleanly when ``time`` is absent."""
+        da = self._array(
+            ["cell", "gene"],
+            {"cell": [f"c{i}" for i in range(10)], "gene": [f"g{i}" for i in range(5)]},
         )
-        with pytest.raises(ValueError, match="requires 'time' dimension"):
-            temporal_analysis(LabeledArray(da_no_time))
-
-    def test_basic_filter_works_without_time(self):
-        from tests.singlecell.test_op.example_ops import basic_filter
-
-        da = xr.DataArray(
-            np.random.rand(10, 5),
-            dims=["cell", "gene"],
-            coords={"cell": [f"c{i}" for i in range(10)], "gene": [f"g{i}" for i in range(5)]},
-        )
-        result = basic_filter(LabeledArray(da, required_dims={"cell", "gene"}), min_expression=0.1)
-        assert isinstance(result, LabeledArray)
-        assert result.data.dims == ("cell", "gene")
-
-    def test_require_dims_helper_rejects_missing_dim(self):
-        from tests.singlecell.test_op.example_ops import require_dims
-
-        da = xr.DataArray(np.ones((4, 2)), dims=["cell", "gene"])
-        with pytest.raises(ValueError, match="requires dimension"):
-            require_dims(LabeledArray(da), "cell", "gene", "time")
+        with pytest.raises(ValueError, match="requires dims"):
+            LabeledArray(da).require("cell", "gene", "time")
 
 
 # ==============================================================================
@@ -243,7 +217,7 @@ def _datasets_csv() -> Path | None:
     if env:
         p = Path(env)
         return p if p.exists() else None
-    # tests/test_kinds.py -> tests -> manylatents-omics -> lrw (repo root)
+    # tests/singlecell/test_kinds.py -> tests/singlecell -> tests -> manylatents-omics
     candidate = Path(__file__).resolve().parents[2] / "Datasets for Geomancer - 10x Genomics.csv"
     return candidate if candidate.exists() else None
 
@@ -323,7 +297,6 @@ def _download_h5(url: str) -> Path:
 def test_random_10x_dataset_loads_validates_and_enforces_dims(ds_name, url):
     """A randomly chosen 10x dataset loads, validates, and respects op dim contracts."""
     from manylatents.singlecell.data.adapters.sources.tenx import make_data
-    from tests.singlecell.test_op.example_ops import basic_filter, temporal_analysis
 
     h5 = _download_h5(url)
 
@@ -338,29 +311,28 @@ def test_random_10x_dataset_loads_validates_and_enforces_dims(ds_name, url):
         raise
     assert isinstance(kind, LabeledArray)
 
-    # 2. Validation: the adapter-declared contract holds on the loaded kind.
-    kind.validate()  # raises on missing dims/coords or null metadata
-    assert {"cell", "gene"} <= set(kind.data.dims)
-    assert {"cell", "gene"} <= set(kind.data.coords)
-    assert kind.required_dims == {"cell", "gene"}
+    # 2. Validation: the loaded kind wraps a well-formed DataArray and satisfies
+    #    the cell/gene contract every downstream op assumes.
+    kind.validate()
+    kind.require("cell", "gene", coords=("cell", "gene"))
+    assert {"cell", "gene"} <= set(kind.da.dims)
+    assert {"cell", "gene"} <= set(kind.da.coords)
 
     # 3. Requiring dimensions for specific ops.
-    #    temporal_analysis needs a 'time' dim, which raw 10x data lacks, so it
+    #    A temporal op needs a 'time' dim, which raw 10x data lacks, so require
     #    must reject this kind cleanly rather than fail deep in a computation.
-    assert "time" not in kind.data.dims
-    with pytest.raises(ValueError, match="requires 'time' dimension"):
-        temporal_analysis(kind)
+    assert "time" not in kind.da.dims
+    with pytest.raises(ValueError, match="requires dims"):
+        kind.require("cell", "gene", "time")
 
-    #    basic_filter only requires cell/gene. Exercise it on a small dense slice
-    #    so we don't materialize the full (often >10k×30k) sparse matrix.
-    n_cells = min(64, kind.data.sizes["cell"])
-    n_genes = min(128, kind.data.sizes["gene"])
-    small = kind.data.isel(cell=slice(0, n_cells), gene=slice(0, n_genes))
+    #    A cell/gene-only op is satisfied. Exercise it on a small dense slice so
+    #    we don't materialize the full (often >10k×30k) sparse matrix.
+    n_cells = min(64, kind.da.sizes["cell"])
+    n_genes = min(128, kind.da.sizes["gene"])
+    small = kind.da.isel(cell=slice(0, n_cells), gene=slice(0, n_genes))
     small = small.copy(data=np.asarray(small.data.todense()))
-    small_kind = LabeledArray(
-        small, required_dims={"cell", "gene"}, required_coords={"cell", "gene"}
-    )
+    small_kind = LabeledArray(small)
 
-    filtered = basic_filter(small_kind, min_expression=0.0)
-    assert isinstance(filtered, LabeledArray)
-    assert {"cell", "gene"} <= set(filtered.data.dims)
+    small_kind.validate()
+    small_kind.require("cell", "gene")
+    assert {"cell", "gene"} <= set(small_kind.da.dims)

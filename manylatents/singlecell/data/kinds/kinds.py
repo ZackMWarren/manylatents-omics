@@ -66,7 +66,7 @@ class LabeledArray(Kind):
 
     @classmethod
     def load(cls, path):
-        da = xr.open_dataset(path, engine="zarr")["data"]
+        da = xr.open_dataarray(path, engine="zarr")
         return cls(da).validate()
 
     @property
