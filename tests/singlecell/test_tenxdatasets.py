@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 
 from manylatents.singlecell.data.kinds.kinds import LabeledArray
-from manylatents.singlecell.data.manifests import select_random
+from manylatents.singlecell.data.manifests import select_random_tenx
 
 
 # ==============================================================================
@@ -121,7 +121,7 @@ def _selected_datasets(n: int = 5):
     seed = os.environ.get("GEOMANCER_TEST_SEED")
     seed = int(seed) if (seed and seed.isdigit()) else None
     try:
-        return select_random(n, seed=seed)
+        return select_random_tenx(n, seed=seed)
     except FileNotFoundError:
         return []
 

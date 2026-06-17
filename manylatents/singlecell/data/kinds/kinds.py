@@ -7,9 +7,10 @@ This ensures ops can read and validate structure instead of guessing.
 
 import logging
 from abc import ABC, abstractmethod
-
+from pathlib import Path
+import numpy as np
 import xarray as xr
-from torch_geometric.data import Data
+import zarr
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class Kind(ABC):
     """
 
     @abstractmethod
-    def validate(self) -> None:
+    def validate(self) -> "Kind":
         """Validate the kind's structure. Raise on failure."""
         ...
 
@@ -42,9 +43,11 @@ class Kind(ABC):
 class LabeledArray(Kind):
     """xarray DataArray with named dimensions."""
     
-    def __init__(self, da: xr.DataArray): self._da = da
+    def __init__(self, da: xr.DataArray): 
+        self._da = da
+        self.validate()
         
-    def validate(self) -> None:
+    def validate(self) -> "LabeledArray":
         if not isinstance(self._da, xr.DataArray):
             raise ValueError("LabeledArray must wrap a DataArray")
         if self._da.size == 0:
@@ -62,14 +65,23 @@ class LabeledArray(Kind):
             raise ValueError(f"requires coords {missing_coords}; got {tuple(self._da.coords)}")
         return self
 
+
+    @staticmethod
+    def _normalize(path: str) -> str:
+        if not str(path).endswith(".zarr"):
+            raise ValueError(f"path must end in .zarr, got {path!r}")
+        return str(path)
+    
     def serialize(self, path: str) -> None:
+        path = self._normalize(path)
         logger.info(f"Serializing {type(self).__name__} to {path}")
         self._da.to_zarr(path, mode="w")
 
     @classmethod
     def load(cls, path):
+        path = cls._normalize(path)
         da = xr.open_dataarray(path, engine="zarr")
-        return cls(da).validate()
+        return cls(da) # validate called from class creation
 
     @property
     def da(self) -> xr.DataArray:
@@ -78,64 +90,42 @@ class LabeledArray(Kind):
     def __repr__(self) -> str:
         return f"LabeledArray(dims={list(self._da.dims)}, shape={self._da.shape})"
 
-# TODO: flesh out
-# So far: container of an edge list and number of nodes
+
 class SparseGraph(Kind):
-    """torch_geometric Data graph."""
+    """2 np arrays: edge list and node ids"""
+    def __init__(self, edges: np.ndarray, node_ids: np.ndarray):
+        self._edges = np.asarray(edges)        
+        self._node_ids = np.asarray(node_ids)
+        self.validate()
 
-    def __init__(self, data: Data): self._data = data
-
-    def validate(self) -> None:
-        if not isinstance(self._data, Data):
-            raise ValueError("SparseGraph must wrap a Data")
+    def validate(self) -> "SparseGraph":
+        if self._edges.ndim != 2 or self._edges.shape[1] != 2:
+            raise ValueError(f"edges must be E×2, got shape {self._edges.shape}")
+        if self._node_ids.ndim != 1:
+            raise ValueError(f"node_ids must be 1-D, got shape {self._node_ids.shape}")
+        if not np.issubdtype(self._edges.dtype, np.integer):
+            raise ValueError(f"edges must be integer dtype, got {self._edges.dtype}")
         return self
-
-    def require(self, *attrs: str) -> "SparseGraph":
-        missing_attrs = [a for a in attrs if a not in self._data]
-        if missing_attrs:
-            raise ValueError(f"requires attrs {missing_attrs}; got {tuple(self._data.keys())}")
-        return self
+    
+    @staticmethod
+    def _normalize(path: str) -> str:
+        if not str(path).endswith(".npz"):
+            raise ValueError(f"path must end in .npz, got {path!r}")
+        return str(path)
 
     def serialize(self, path: str) -> None:
-        import torch
         logger.info(f"Serializing {type(self).__name__} to {path}")
-        torch.save(self._data, path)
+        np.savez_compressed(self._normalize(path), edges=self._edges, node_ids=self._node_ids)
 
     @classmethod
     def load(cls, path):
-        import torch
-        data = torch.load(path, weights_only=False)
-        return cls(data).validate()
+        
+        with np.load(cls._normalize(path)) as d:
+            return cls(d['edges'], d['node_ids']) # validate called from class creation
 
     @property
-    def data(self) -> Data:
-        return self._data
+    def data(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._edges, self._node_ids
 
     def __repr__(self) -> str:
-        return f"SparseGraph(num_nodes={self._data.num_nodes}, num_edges={self._data.num_edges})"
-    
-# Storage method up to change
-class TrajectoryXXX(Kind):
-    def __init__(self):
-        pass
-    
-    def validate(self) -> None:
-        pass
-
-    def require(self,) -> "TrajectoryXXX":
-        pass
-
-    def serialize(self, path: str) -> None:
-        pass
-
-    @classmethod
-    def load(cls, path):
-        pass
-
-    @property
-    def data(self): # -> "datatype"
-        pass
-
-    def __repr__(self) -> str:
-        pass
-    
+        return f"SparseGraph(num_nodes={self._node_ids.shape[0]}, num_edges={self._edges.shape[0]})"

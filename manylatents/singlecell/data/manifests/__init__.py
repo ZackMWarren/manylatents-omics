@@ -1,5 +1,15 @@
-"""Dataset manifest registry: the single source of truth for available datasets."""
+"""10x Genomics dataset registry: the single source of truth for 10x datasets."""
 
-from .registry import DatasetEntry, load_manifest, manifest_path, select_random
+from .tenx_registry import (
+    TenxDatasetEntry,
+    load_tenx_manifest,
+    select_random_tenx,
+    tenx_manifest_path,
+)
 
-__all__ = ["DatasetEntry", "load_manifest", "manifest_path", "select_random"]
+__all__ = [
+    "TenxDatasetEntry",
+    "load_tenx_manifest",
+    "select_random_tenx",
+    "tenx_manifest_path",
+]
