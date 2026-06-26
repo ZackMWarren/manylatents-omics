@@ -2,7 +2,7 @@
 Tests for the dataset loading path: malformed-dataset rejection and real 10x loads.
 
 Demonstrates that:
-1. Malformed datasets are refused at ingestion by the loader (``make_data`` /
+1. Malformed datasets are refused at ingestion by the loader (``read_tenx`` /
    ``from_anndata``) — the core "reject bad data" guarantee. Runs offline against
    fabricated AnnData.
 2. Real 10x datasets sampled from the dataset manifest load, validate, and have
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from manylatents.singlecell.data.kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 from manylatents.singlecell.data.manifests import select_random_tenx
 
 
@@ -40,7 +40,7 @@ from manylatents.singlecell.data.manifests import select_random_tenx
 
 
 class TestMalformedDatasetRejected:
-    """Malformed datasets are refused by the loader (``make_data`` / ``from_anndata``)."""
+    """Malformed datasets are refused by the loader (``read_tenx`` / ``from_anndata``)."""
 
     def _adata(
         self,
@@ -68,11 +68,11 @@ class TestMalformedDatasetRejected:
         return ad.AnnData(X=X, obs=pd.DataFrame(index=obs_index), var=var)
 
     def _load(self, monkeypatch, adata, **kwargs):
-        """Run a fabricated AnnData through the real ``make_data`` validation path."""
+        """Run a fabricated AnnData through the real ``read_tenx`` validation path."""
         from manylatents.singlecell.data.adapters.sources import tenx
 
         monkeypatch.setattr(tenx.sc, "read_10x_h5", lambda _path: adata)
-        return tenx.make_data("ignored.h5", metadata={}, **kwargs)
+        return tenx.read_tenx("ignored.h5", metadata={}, **kwargs)
 
     def test_missing_gene_ids_is_rejected(self, monkeypatch):
         with pytest.raises(ValueError, match="gene_ids"):
@@ -177,13 +177,13 @@ def _download_h5(url: str) -> Path:
 )
 def test_random_10x_dataset_loads_validates_and_enforces_dims(entry):
     """A randomly chosen 10x dataset loads, validates, and respects op dim contracts."""
-    from manylatents.singlecell.data.adapters.sources.tenx import make_data
+    from manylatents.singlecell.data.adapters.sources.tenx import read_tenx
 
     h5 = _download_h5(entry.url)
 
     # 1. Loading: real 10x .h5 -> typed LabeledArray via the production adapter.
     try:
-        kind = make_data(str(h5))
+        kind = read_tenx(str(h5))
     except ValueError as e:
         # The adapter rejects non-scRNA-seq (antibody/CRISPR) modalities at the
         # edge — that's correct behavior, just not testable as scRNA-seq here.

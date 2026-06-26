@@ -11,7 +11,7 @@ import numpy as np
 import xarray as xr
 import scipy.sparse as sp
 import sparse
-from ...kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def from_anndata(
 
     logger.info(
         f"Successfully converted to LabeledArray: "
-        f"shape={kind._da.shape}, dims={list(kind._da.dims)}"
+        f"shape={kind.da.shape}, dims={list(kind.da.dims)}"
     )
 
     return kind
@@ -104,7 +104,7 @@ def from_bulk(
     kind = LabeledArray(da)
     logger.info(
         f"Successfully converted to LabeledArray: "
-        f"shape={kind._da.shape}, dims={list(kind._da.dims)}"
+        f"shape={kind.da.shape}, dims={list(kind.da.dims)}"
     )
 
     return kind

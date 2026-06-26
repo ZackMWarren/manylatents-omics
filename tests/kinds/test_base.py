@@ -2,7 +2,7 @@
 
 import pytest
 
-from manylatents.singlecell.data.kinds.kinds import Kind
+from manylatents.kinds import Kind
 
 
 def test_kind_is_abstract():

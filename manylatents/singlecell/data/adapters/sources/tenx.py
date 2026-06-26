@@ -6,12 +6,12 @@ import pandas as pd
 import scanpy as sc
 
 from ..formats.adapters import from_anndata
-from ...kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 
 logger = logging.getLogger(__name__)
 
 
-def make_data(
+def read_tenx(
     adata_path,
     metadata: Optional[dict] = {},
     use_raw: bool = False,

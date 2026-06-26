@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from manylatents.singlecell.data.kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 
 
 def labeled_da(dims, coords):

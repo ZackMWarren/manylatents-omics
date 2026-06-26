@@ -10,15 +10,19 @@ convention.
 ## Directory Structure
 
 ```
-manylatents/singlecell/data/
-├── kinds/kinds.py                  # Typed kinds: LabeledArray, SparseGraph
-├── adapters/formats/adapters.py    # Generic: AnnData → LabeledArray  (from_anndata)
-├── adapters/sources/tenx.py        # Specific: 10x .h5 loader          (make_data)
-├── manifests/datasets_10x.csv      # Dataset registry (the spreadsheet's home)
-├── manifests/tenx_registry.py      # 10x registry loader — single source of truth
-├── anndata.py                      # existing datamodule
-├── anndata_dataset.py
-└── cellxgene_census.py
+manylatents/
+├── kinds/base.py                       # Kind: the abstract base class (the contract)
+├── kinds/labeled_array.py              # LabeledArray kind
+├── kinds/sparse_graph.py               # SparseGraph kind
+├── kinds/__init__.py                   # Re-exports Kind, LabeledArray, SparseGraph
+└── singlecell/data/
+    ├── adapters/formats/adapters.py    # Generic: AnnData → LabeledArray  (from_anndata)
+    ├── adapters/sources/tenx.py        # Specific: 10x .h5 loader          (read_tenx)
+    ├── manifests/datasets_10x.csv      # Dataset registry (the spreadsheet's home)
+    ├── manifests/tenx_registry.py      # 10x registry loader — single source of truth
+    ├── anndata.py                      # existing datamodule
+    ├── anndata_dataset.py
+    └── cellxgene_census.py
 ```
 
 ## The Problem We're Solving
@@ -29,9 +33,14 @@ manylatents/singlecell/data/
 
 ## The Kinds
 
-Every kind subclasses `Kind` (`kinds.py`) and implements four things:
-**constructor** (calls `validate()`), `validate()`, `serialize(path)`, and
-`load(path)` (constructs, so it validates too).
+Every kind is a **frozen dataclass** that subclasses `Kind` (`base.py`) and lives
+in its own module (`labeled_array.py`, `sparse_graph.py`). `frozen=True` makes
+instances immutable after construction; `eq=False` keeps identity-based equality
+(the auto-generated `__eq__` would compare the wrapped arrays element-wise and
+raise on the ambiguous truth value). Each implements four things:
+**`__post_init__`** (calls `validate()`), `validate()`, `serialize(path)`, and
+`load(path)` (constructs, so it validates too). All three are re-exported from
+the `kinds` package, so import them from `manylatents.kinds`.
 
 | Kind | Wraps | Required structure | Status |
 |------|-------|--------------------|--------|
@@ -54,7 +63,7 @@ matrices and other labeled array data.
 ```python
 import numpy as np
 import xarray as xr
-from manylatents.singlecell.data.kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 
 da = xr.DataArray(
     np.random.rand(1000, 2000),                 # 1000 cells × 2000 genes
@@ -105,7 +114,7 @@ runs `validate()`.
 
 ```python
 import numpy as np
-from manylatents.singlecell.data.kinds.kinds import SparseGraph
+from manylatents.kinds import SparseGraph
 
 edges = np.array([[0, 1], [1, 2], [2, 0]])   # E×2 integer edge list
 node_ids = np.array([0, 1, 2])               # 1-D node ids
@@ -136,8 +145,8 @@ For 10x `.h5` files, `adapters/sources/tenx.py` wraps this with the right field
 checks (rejects non-scRNA-seq modalities, requires `gene_ids`/`genome`):
 
 ```python
-from manylatents.singlecell.data.adapters.sources.tenx import make_data
-kind = make_data("filtered_feature_bc_matrix.h5")   # -> validated LabeledArray
+from manylatents.singlecell.data.adapters.sources.tenx import read_tenx
+kind = read_tenx("filtered_feature_bc_matrix.h5")   # -> validated LabeledArray
 ```
 
 ## Example Ops
@@ -153,7 +162,7 @@ basic_filter(kind, min_expression=0.1)   # needs only cell/gene
 ```
 
 These are exercised by `TestExampleOps` in
-`tests/singlecell/test_kinds/test_example_ops.py` so they stay in sync with the
+`tests/kinds/test_example_ops.py` so they stay in sync with the
 kind API.
 
 ## Dataset Manifest (the spreadsheet's home)
@@ -165,7 +174,7 @@ single source of truth for *what data exists* — nothing hardcodes dataset path
 
 **The spreadsheet is expected to change.** To update it, drop in a fresh export
 with the same columns (only `Dataset_Name` and `wget_commands` — which must hold
-a `.h5` URL — are required; extra columns are ignored). To use a private or newer
+a `.h5` URL — are required; extra columns are addtional medtadata). To use a private or newer
 copy without editing the repo, set `GEOMANCER_DATASETS_CSV` to its path; it
 overrides the in-repo default.
 
@@ -180,31 +189,28 @@ for entry in load_tenx_manifest():
     print(entry.name, entry.url)
 ```
 
-### Adding a dataset
-
-1. Add to an exisiting manifests website's file (i.e tenx_registry.py), or create a new file for
-   a new source of datasets. Ensure that there is a `Dataset_Name` and a `wget_commands` cell containing the `.h5` download URL. Add additional metadata in additional columns.
-2. It is now discoverable via `load_tenx_manifest()` / `select_random_tenx()` — no
-   code change needed.
-3. Load it through the standard path: download the `.h5`, then `make_data(path)`.
-
-The real-data test `test_random_10x_dataset_loads_validates_and_enforces_dims`
-samples from this manifest and runs each dataset through `make_data`, validating
-structure on read. It is marked `network`/`slow` and skips when the manifest is
-absent or the host is offline.
-
 ## Adding a New Kind
 
-1. **Define the class** in `kinds/kinds.py`:
+1. **Define the class** in its own module, `kinds/my_kind.py`, as a frozen
+   dataclass subclassing `Kind` from `base.py`:
 
 ```python
+from dataclasses import dataclass
+
+from .base import Kind
+
+
+@dataclass(frozen=True, eq=False)
 class MyKind(Kind):
-    def __init__(self, data):
-        self._data = data
+    data: SomeType
+
+    def __post_init__(self):
         self.validate()               # validation runs on construction
+        # To normalize a field on a frozen instance, bypass the guard:
+        # object.__setattr__(self, "data", _normalize(self.data))
 
     def validate(self):
-        if not _is_valid(self._data):
+        if not _is_valid(self.data):
             raise ValueError("MyKind: <what's wrong>")
         return self
 
@@ -214,15 +220,18 @@ class MyKind(Kind):
     @classmethod
     def load(cls, path):
         data = ...                    # read from disk
-        return cls(data)              # __init__ validates, so load validates too
+        return cls(data)              # __post_init__ validates, so load validates too
 ```
 
-2. **Write tests** in `tests/singlecell/test_kinds`:
+2. **Re-export it** from `kinds/__init__.py` so it can be imported from the
+   `kinds` package alongside the others.
+
+3. **Write tests** in `tests/kinds`:
    - a **round-trip** test (construct → serialize → load → identical), and
    - a **rejection** test (malformed input fails on `validate`/`load`).
    - additional tests specific to the kind
 
-3. **Update this README** with the kind, its required structure, and usage.
+4. **Update this README** with the kind, its required structure, and usage.
 
 ## Invariants Every Kind Must Hold
 
@@ -245,4 +254,4 @@ construct → validate()
 
 ---
 
-*Last updated: 2026-06-16*
+*Last updated: 2026-06-26*

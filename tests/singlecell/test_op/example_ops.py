@@ -9,7 +9,7 @@ position.
 
 import logging
 
-from manylatents.singlecell.data.kinds.kinds import LabeledArray  # Core typed kind
+from manylatents.kinds import LabeledArray  # Core typed kind
 
 logger = logging.getLogger(__name__)
 

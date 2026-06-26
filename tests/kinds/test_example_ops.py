@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from manylatents.singlecell.data.kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 
 
 def labeled_da(dims, coords):
@@ -17,7 +17,6 @@ def labeled_da(dims, coords):
 
 
 class TestExampleOps:
-    """Smoke tests so ``tests/singlecell/test_op/example_ops.py`` can't silently rot."""
 
     def test_temporal_analysis_requires_time(self):
         from tests.singlecell.test_op.example_ops import temporal_analysis

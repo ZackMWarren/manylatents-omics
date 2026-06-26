@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from manylatents.singlecell.data.kinds.kinds import SparseGraph
+from manylatents.kinds import SparseGraph
 
 @pytest.fixture
 def rng():

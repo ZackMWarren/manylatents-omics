@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import numpy as np
 import xarray as xr
-from manylatents.singlecell.data.kinds.kinds import LabeledArray
+from manylatents.kinds import LabeledArray
 
 class TestLabeledArrayRoundTrip:
     def test_round_trip_basic(self):

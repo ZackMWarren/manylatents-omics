@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 import pytest
 import numpy as np
-from manylatents.singlecell.data.kinds.kinds import SparseGraph
+from manylatents.kinds import SparseGraph
 
 class TestSparseGraphRoundTrip:
     def test_round_trip_basic(self):
