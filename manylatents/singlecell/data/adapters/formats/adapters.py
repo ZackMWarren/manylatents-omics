@@ -1,10 +1,3 @@
-"""
-Adapters: convert ecosystem formats to typed kinds at the ingestion edge.
-
-AnnData is accepted here and converted to LabeledArray immediately.
-No internal code uses AnnData directly — it stays at the edge.
-"""
-
 import logging
 from typing import Optional
 import numpy as np
@@ -39,8 +32,7 @@ def from_anndata(
     else:
         X = adata.X
     
-    # xarray cannot wrap a scipy.sparse matrix directly
-    # Convert to a pydata ``sparse.COO`` duck array
+    # Convert to ``sparse.COO`` duck array (needed for xarray)
     if sp.issparse(X):
         data = sparse.COO.from_scipy_sparse(X.tocsr())
     else:
@@ -61,51 +53,3 @@ def from_anndata(
     )
 
     return kind
-
-def from_bulk(
-    counts: pd.DataFrame,
-    metadata: Optional[dict] = None,
-) -> LabeledArray:
-    """
-    Convert a bulk expression matrix to a typed LabeledArray kind.
-
-    ``counts`` is genes × samples (rows indexed by gene id, columns by sample
-    id). ``metadata`` is attached as DataArray attributes, the same as
-    :func:`from_anndata`.
-
-    The frame must declare its orientation via axis names
-    (``index.name == "gene"``, ``columns.name == "sample"``) and carry real
-    labels — a default integer ``RangeIndex`` is rejected, since values alone
-    cannot distinguish a sample from a gene.
-    """
-    if counts.index.name != "gene" or counts.columns.name != "sample":
-        raise ValueError(
-            "from_bulk expects a genes × samples frame with "
-            "index.name='gene' and columns.name='sample'; got "
-            f"index.name={counts.index.name!r}, columns.name={counts.columns.name!r}"
-        )
-    if isinstance(counts.index, pd.RangeIndex):
-        raise ValueError("gene ids missing: counts.index is a default RangeIndex")
-    if isinstance(counts.columns, pd.RangeIndex):
-        raise ValueError("sample ids missing: counts.columns is a default RangeIndex")
-
-    gene_ids = counts.index.to_list()
-    sample_ids = counts.columns.to_list()
-
-    data = sparse.COO.from_numpy(np.asarray(counts.to_numpy()))
-
-    da = xr.DataArray(
-        data,
-        dims=["gene", "sample"],
-        coords={"gene": gene_ids, "sample": sample_ids},
-        attrs=metadata or {},
-    )
-
-    kind = LabeledArray(da)
-    logger.info(
-        f"Successfully converted to LabeledArray: "
-        f"shape={kind.da.shape}, dims={list(kind.da.dims)}"
-    )
-
-    return kind
-    
