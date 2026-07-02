@@ -49,13 +49,65 @@ class LabeledArray(Kind):
     def serialize(self, path: str) -> None:
         path = self._normalize(path)
         logger.info(f"Serializing {type(self).__name__} to {path}")
-        self.da.to_zarr(path, mode="w")
+        import sparse
+
+        da = self.da
+        # Dense arrays serialize natively; only sparse needs the 
+        # COO-component format below (serialization doesn't work cleanly with sparse)
+        if not isinstance(da.data, sparse.COO):
+            da.to_zarr(path, mode="w")
+            return
+
+        coo = da.data
+        ds = xr.Dataset(
+            {
+                "coo_coords": (("ndim", "nnz"), coo.coords),  
+                "coo_data": (("nnz",), coo.data),             
+            },
+            attrs={
+                "shape": list(coo.shape),
+                "dims": list(da.dims),
+                "fill_value": coo.fill_value.item(), 
+                "name": da.name or "",
+                "da_attrs": dict(da.attrs),
+                # in conjunction with the for loop, ensures additional coords
+                # stay alligned with their dim (i.e cell + time)
+                "coord_dims": {name: list(c.dims) for name, c in da.coords.items()},
+            },
+        )
+    
+        for name, c in da.coords.items():
+            ds = ds.assign_coords(
+                {f"coord_{name}": (tuple(f"len_{d}" for d in c.dims), c.values)}
+            )
+        ds.to_zarr(path, mode="w")
 
     @classmethod
     def load(cls, path):
         path = cls._normalize(path)
-        da = xr.open_dataarray(path, engine="zarr")
-        return cls(da) # validate called from __post_init__
+        ds = xr.open_zarr(path)
+        if "coo_data" not in ds:
+            # Dense: reload as a DataArray to preserve its numpy backing.
+            return cls(xr.open_dataarray(path, engine="zarr"))  # validate via __post_init__
+
+        import sparse
+
+        coo = sparse.COO(
+            coords=ds["coo_coords"].values,
+            data=ds["coo_data"].values,
+            shape=tuple(ds.attrs["shape"]),
+            fill_value=ds.attrs["fill_value"],
+        )
+        coord_dims = ds.attrs["coord_dims"]
+        coords = {
+            name: (tuple(coord_dims[name]), ds[f"coord_{name}"].values)
+            for name in coord_dims
+        }
+        da = xr.DataArray(
+            coo, dims=ds.attrs["dims"], coords=coords, name=ds.attrs["name"] or None
+        )
+        da.attrs = dict(ds.attrs.get("da_attrs", {}))
+        return cls(da)  # validate called from __post_init__
 
     def __repr__(self) -> str:
         return f"LabeledArray(dims={list(self.da.dims)}, shape={self.da.shape})"

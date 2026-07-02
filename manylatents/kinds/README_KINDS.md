@@ -90,14 +90,28 @@ def my_op(kind: LabeledArray) -> LabeledArray:
     return LabeledArray(result)
 ```
 
-**Serialization** is zarr. `load` reads the array back with `open_dataarray`, so
-the round-trip is name-agnostic (works for the unnamed arrays the adapter
-produces) and runs `validate()` on read:
+**Serialization** is zarr and runs `validate()` on read. Dense arrays are written
+natively; the round-trip is name-agnostic (works for the unnamed arrays the
+adapter produces).
 
 ```python
 kind.serialize("data.zarr")
 loaded = LabeledArray.load("data.zarr")      # validates on read
 ```
+
+> **Sparse data must be a pydata `sparse.COO`, not a scipy sparse matrix.** zarr
+> can't serialize a sparse-backed `DataArray` directly, so `serialize` stores the
+> bare COO components (`coords`, `data`, `fill_value`) plus dims/coords/attrs and
+> rebuilds the array on `load`. This path is keyed on the backing array being a
+> `sparse.COO` — a scipy CSR/CSC/COO matrix is not recognized by xarray as an
+> array backing and won't round-trip. Convert first:
+>
+> ```python
+> import sparse
+> coo = sparse.COO.from_scipy_sparse(scipy_csr)   # scipy -> pydata sparse.COO
+> da = xr.DataArray(coo, dims=["cell", "gene"], coords={...})
+> LabeledArray(da).serialize("data.zarr")
+> ```
 
 ### SparseGraph
 
@@ -254,4 +268,4 @@ construct → validate()
 
 ---
 
-*Last updated: 2026-06-26*
+*Last updated: 2026-07-02*
