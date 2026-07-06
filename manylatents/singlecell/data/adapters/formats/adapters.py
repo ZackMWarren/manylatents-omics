@@ -3,6 +3,8 @@ Adapters: convert ecosystem formats to typed kinds at the ingestion edge.
 
 AnnData is accepted here and converted to LabeledArray immediately.
 No internal code uses AnnData directly — it stays at the edge.
+
+Metadata must be chosen rather than assumed
 """
 
 import logging
@@ -44,7 +46,7 @@ def from_anndata(
     if sp.issparse(X):
         data = sparse.COO.from_scipy_sparse(X.tocsr())
     else:
-        data = sparse.COO.from_numpy(np.asarray(X))
+        data = X
         
     da = xr.DataArray(
         data,

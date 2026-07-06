@@ -17,8 +17,11 @@ class LabeledArray(Kind):
     """xarray DataArray with named dimensions."""
 
     da: xr.DataArray
+    provenance: tuple[str, ...] = ()
 
     def __post_init__(self):
+        # frozen: bypass the immutability guard to normalize provenance to a tuple
+        object.__setattr__(self, "provenance", tuple(self.provenance))
         self.validate()
 
     def validate(self) -> "LabeledArray":
@@ -39,6 +42,13 @@ class LabeledArray(Kind):
             raise ValueError(f"requires coords {missing_coords}; got {tuple(self.da.coords)}")
         return self
 
+    def tagged(self, op_name: str) -> "LabeledArray":
+        """
+        Return a copy with ``op_name`` appended to the provenance trail.
+        Part of the geomancy ``Kind`` protocol: geomancy's op registry appends to
++       this trail as it runs each op. Immutable: the original is untouched.
+        """
+        return LabeledArray(self.da, self.provenance + (op_name,))
 
     @staticmethod
     def _normalize(path: str) -> str:
@@ -52,9 +62,13 @@ class LabeledArray(Kind):
         import sparse
 
         da = self.da
-        # Dense arrays serialize natively; only sparse needs the 
+        # Dense arrays serialize natively; only sparse needs the
         # COO-component format below (serialization doesn't work cleanly with sparse)
         if not isinstance(da.data, sparse.COO):
+            # provenance rides in attrs (only when non-empty) so the op trail
+            # survives the round-trip, reusing xarray's attrs-preservation.
+            if self.provenance:
+                da = da.assign_attrs(provenance=list(self.provenance))
             da.to_zarr(path, mode="w")
             return
 
@@ -70,6 +84,7 @@ class LabeledArray(Kind):
                 "fill_value": coo.fill_value.item(), 
                 "name": da.name or "",
                 "da_attrs": dict(da.attrs),
+                "provenance": list(self.provenance),
                 # in conjunction with the for loop, ensures additional coords
                 # stay alligned with their dim (i.e cell + time)
                 "coord_dims": {name: list(c.dims) for name, c in da.coords.items()},
@@ -88,7 +103,10 @@ class LabeledArray(Kind):
         ds = xr.open_zarr(path)
         if "coo_data" not in ds:
             # Dense: reload as a DataArray to preserve its numpy backing.
-            return cls(xr.open_dataarray(path, engine="zarr"))  # validate via __post_init__
+            da = xr.open_dataarray(path, engine="zarr")
+            # pull provenance back out of attrs so it doesn't linger as a domain attr
+            provenance = tuple(da.attrs.pop("provenance", ()))
+            return cls(da, provenance=provenance)  # validate via __post_init__
 
         import sparse
 
@@ -107,7 +125,11 @@ class LabeledArray(Kind):
             coo, dims=ds.attrs["dims"], coords=coords, name=ds.attrs["name"] or None
         )
         da.attrs = dict(ds.attrs.get("da_attrs", {}))
-        return cls(da)  # validate called from __post_init__
+        provenance = tuple(ds.attrs.get("provenance", ()))
+        return cls(da, provenance=provenance)  # validate called from __post_init__
 
     def __repr__(self) -> str:
-        return f"LabeledArray(dims={list(self.da.dims)}, shape={self.da.shape})"
+        return (
+            f"LabeledArray(dims={list(self.da.dims)}, shape={self.da.shape}, "
+            f"provenance={self.provenance})"
+        )

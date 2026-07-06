@@ -37,15 +37,47 @@ Every kind is a **frozen dataclass** that subclasses `Kind` (`base.py`) and live
 in its own module (`labeled_array.py`, `sparse_graph.py`). `frozen=True` makes
 instances immutable after construction; `eq=False` keeps identity-based equality
 (the auto-generated `__eq__` would compare the wrapped arrays element-wise and
-raise on the ambiguous truth value). Each implements four things:
-**`__post_init__`** (calls `validate()`), `validate()`, `serialize(path)`, and
-`load(path)` (constructs, so it validates too). All three are re-exported from
-the `kinds` package, so import them from `manylatents.kinds`.
+raise on the ambiguous truth value). `base.py` declares five abstract members
+every kind implements: `validate()`, `serialize(path)`, `load(path)` (constructs,
+so it validates too), plus `require(*dims, coords=())` and `tagged(op_name)` — the
+two halves of geomancy's op protocol (see [Op protocol](#op-protocol-require-tagged--provenance)
+below). Each kind also runs `validate()` from its `__post_init__`, so validation
+fires on construction. All three kinds are re-exported from the `kinds` package,
+so import them from `manylatents.kinds`.
 
 | Kind | Wraps | Required structure | Status |
 |------|-------|--------------------|--------|
 | `LabeledArray` | `xarray.DataArray` | a non-empty `DataArray`; dims declared per-op | ✅ implemented |
 | `SparseGraph` | two `numpy` arrays | `edges` (E×2 integer) + `node_ids` (1-D) | ✅ implemented |
+
+### Op protocol: `require`, `tagged` & provenance
+
+Beyond validation and persistence, every kind participates in geomancy's op
+protocol through two methods and a provenance trail. This is what lets geomancy's
+op registry declare contracts and record what it ran, without this repo importing
+geomancy.
+
+**`require(*dims, coords=())`** is how an op declares the structure it consumes.
+It raises a clear `ValueError` if a named dim/component or coord is missing, and
+returns `self` for chaining. Each kind interprets the names against its own
+structure — `LabeledArray` checks its `DataArray` dims/coords; `SparseGraph`
+checks its named components (`edges`, `node_ids`) and carries no coords.
+
+**`tagged(op_name)`** returns a *copy* with `op_name` appended to the kind's
+`provenance` trail. Because kinds are frozen, the original is untouched — the op
+registry calls `tagged` as it runs each op to build up an ordered record of the
+pipeline:
+
+```python
+kind = LabeledArray(da)                       # provenance == ()
+kind = kind.tagged("normalize").tagged("log1p")
+kind.provenance                               # ("normalize", "log1p")
+```
+
+**`provenance`** is a `tuple[str, ...]` field on every kind, defaulting to `()`
+and normalized to a tuple on construction. It **survives serialization** — the
+zarr (`LabeledArray`) and `.npz` (`SparseGraph`) round-trips both carry the trail
+through, so `load` returns a kind with the same provenance it was saved with.
 
 ### LabeledArray
 
@@ -123,8 +155,10 @@ vector. No heavy graph dependency — just numpy.
 - **Accessor:** `.data` returns the `(edges, node_ids)` tuple.
 
 `validate()` enforces the shapes and the integer edge dtype, returning `self`.
-**Serialization** is `np.savez_compressed`; `load` reads the arrays back and
-runs `validate()`.
+`require` accepts the graph's named components (`edges`, `node_ids`) and rejects
+any coords, since a bare edge list carries none. **Serialization** is
+`np.savez_compressed`; the `provenance` trail rides along as a string array, and
+`load` reads the arrays back (restoring provenance) and runs `validate()`.
 
 ```python
 import numpy as np
@@ -217,8 +251,10 @@ from .base import Kind
 @dataclass(frozen=True, eq=False)
 class MyKind(Kind):
     data: SomeType
+    provenance: tuple[str, ...] = ()  # op protocol: the trail tagged() appends to
 
     def __post_init__(self):
+        object.__setattr__(self, "provenance", tuple(self.provenance))
         self.validate()               # validation runs on construction
         # To normalize a field on a frozen instance, bypass the guard:
         # object.__setattr__(self, "data", _normalize(self.data))
@@ -228,12 +264,19 @@ class MyKind(Kind):
             raise ValueError("MyKind: <what's wrong>")
         return self
 
+    def require(self, *dims: str, coords: tuple[str, ...] = ()) -> "MyKind":
+        # raise ValueError("requires ...") if a named part/coord is absent
+        return self
+
+    def tagged(self, op_name: str) -> "MyKind":
+        return MyKind(self.data, self.provenance + (op_name,))
+
     def serialize(self, path: str) -> None:
-        ...
+        ...                           # persist provenance too, so it round-trips
 
     @classmethod
     def load(cls, path):
-        data = ...                    # read from disk
+        data = ...                    # read from disk (incl. provenance)
         return cls(data)              # __post_init__ validates, so load validates too
 ```
 
@@ -259,6 +302,7 @@ construct → validate()
 - Malformed data is rejected on read, not silently accepted.
 - Named dims survive slicing/transposing.
 - Coords/attrs are preserved across the round-trip.
+- The `provenance` trail is preserved across the round-trip.
 
 ## Coordination with Downstreams
 
@@ -268,4 +312,4 @@ construct → validate()
 
 ---
 
-*Last updated: 2026-07-02*
+*Last updated: 2026-07-06*
