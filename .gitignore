@@ -15,6 +15,10 @@ htmlcov/
 uv.lock
 .ipynb_checkpoints
 
+# macOS Finder metadata (any directory)
+.DS_Store
+**/.DS_Store
+
 # Runtime artifacts
 logs/
 outputs/
@@ -28,3 +32,6 @@ docs/plans/
 # Claude Code state
 .claude/
 wandb/
+
+# Proprietary dataset manifest (obtain out of band; see manifests/registry.py)
+manylatents/singlecell/data/manifests/*.csv
