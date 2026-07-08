@@ -1,10 +1,19 @@
+"""
+Adapters: convert ecosystem formats to typed kinds at the ingestion edge.
+
+AnnData is accepted here and converted to LabeledArray immediately.
+No internal code uses AnnData directly — it stays at the edge.
+
+Metadata must be chosen rather than assumed
+"""
+
 import logging
 from typing import Optional
 import numpy as np
 import xarray as xr
 import scipy.sparse as sp
 import sparse
-from manylatents.kinds import LabeledArray
+from manykinds import LabeledArray
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -32,11 +41,12 @@ def from_anndata(
     else:
         X = adata.X
     
-    # Convert to ``sparse.COO`` duck array (needed for xarray)
+    # xarray cannot wrap a scipy.sparse matrix directly
+    # Convert to a pydata ``sparse.COO`` duck array
     if sp.issparse(X):
         data = sparse.COO.from_scipy_sparse(X.tocsr())
     else:
-        data = sparse.COO.from_numpy(np.asarray(X))
+        data = X
         
     da = xr.DataArray(
         data,

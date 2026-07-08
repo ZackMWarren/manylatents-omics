@@ -36,10 +36,29 @@ _DEFAULT_10X_MANIFEST = Path(__file__).with_name("datasets_10x.csv")
 # Matches a wget URL ending in .h5 inside the spreadsheet's wget_commands column.
 _H5_URL_RE = re.compile(r"https?://\S+?\.h5\b")
 
+def _parse_bool(value: str | None) -> bool:
+    """Parse a manifest ``Use_Time`` cell: strictly ``TRUE`` or ``FALSE``.
+
+    Any other value (including blank) is rejected so a malformed manifest fails
+    loudly rather than being silently coerced.
+    """
+    cell = (value or "").strip()
+    if cell == "TRUE":
+        return True
+    if cell == "FALSE":
+        return False
+    raise ValueError(
+        f"Use_Time must be 'TRUE' or 'FALSE', got {value!r}"
+    )
+
 
 @dataclass
 class TenxDatasetEntry:
     """One 10x manifest row: name, downloadable ``.h5`` URL, and remaining columns.
+
+    ``use_time`` mirrors the manifest's ``Use_Time`` column: when true, this
+    dataset carries a per-cell timepoint in the barcode suffix and should be
+    loaded with ``read_tenx(..., use_time=True)``.
 
     ``meta`` carries every other spreadsheet column verbatim (``Species``,
     ``Tissue``, ``Number_of_Cells``, ``DOI``, ...), so new columns flow through
@@ -49,6 +68,7 @@ class TenxDatasetEntry:
 
     name: str
     url: str
+    use_time: bool = False
     meta: dict[str, str] = field(default_factory=dict)
 
 
@@ -82,10 +102,11 @@ def load_tenx_manifest(path: Path | None = None) -> list[TenxDatasetEntry]:
                     TenxDatasetEntry(
                         name=row.get("Dataset_Name") or match.group(0),
                         url=match.group(0),
+                        use_time=_parse_bool(row.get("Use_Time")),
                         meta={
                             k: v
                             for k, v in row.items()
-                            if k not in ("Dataset_Name", "wget_commands")
+                            if k not in ("Dataset_Name", "wget_commands", "Use_Time")
                         },
                     )
                 )
